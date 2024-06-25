@@ -1118,6 +1118,822 @@ menor al límite retornar “OCUPACION DEL DEPOSITO XX %” siendo XX el
 “DEPOSITO COMPLETO”.
 */
 
+CREATE FUNCTION dbo.EstadoDeposito (@deposito char(2), @producto char(8))
+RETURNS char(30)
+AS
+    BEGIN
+        DECLARE @ocupacion decimal(12,2) =
+            (SELECT (stoc_cantidad * 100 / stoc_stock_maximo)
+             FROM STOCK
+             WHERE stoc_deposito = @deposito
+               AND stoc_producto = @producto)
+        RETURN
+            CASE
+                WHEN @ocupacion = 100
+                    THEN ('DEPOSITO COMPLETO')
+                ELSE ('OCUPACION DEL DEPOSITO ' + CONVERT(varchar(10),@ocupacion) +
+                      '%')
+                END
+    END
+GO
 
+
+/*
+Punto 2.
+Realizar una función que dado un artículo y una fecha, retorne el stock que
+existía a esa fecha
+*/
+
+CREATE FUNCTION dbo.StockEnFecha(@producto CHAR(8), @fecha DATETIME)
+    RETURNS DECIMAL(12, 2)
+AS
+BEGIN
+    RETURN (SELECT SUM(stoc_cantidad) FROM STOCK WHERE stoc_producto = @producto) + (SELECT SUM(item_cantidad)
+                                                                                     FROM Item_Factura
+                                                                                              JOIN dbo.Factura F
+                                                                                                   on F.fact_tipo =
+                                                                                                      Item_Factura.item_tipo and
+                                                                                                      F.fact_sucursal =
+                                                                                                      Item_Factura.item_sucursal and
+                                                                                                      F.fact_numero =
+                                                                                                      Item_Factura.item_numero
+                                                                                     WHERE item_producto = @producto AND fact_fecha >= @fecha);
+
+END
+
+
+/*
+Punto 3.
+Cree el/los objetos de base de datos necesarios para corregir la tabla empleado
+en caso que sea necesario.
+Se sabe que debería existir un único gerente general
+(debería ser el único empleado sin jefe).
+Si detecta que hay más de un empleado sin jefe deberá elegir entre ellos el gerente general,
+el cual será seleccionado por mayor salario. Si hay más de uno se seleccionara
+el de mayor antigüedad en la empresa. Al finalizar la ejecución del objeto la
+tabla deberá cumplir con la regla de un único empleado sin jefe (el gerente general)
+y deberá retornar la cantidad de empleados que había sin jefe antes de la ejecución.
+*/
+
+
+CREATE PROC ChequearGerentes (@CantSinJefe int OUTPUT)
+AS
+    BEGIN
+        DECLARE @GerenteGrl numeric(6) = (SELECT TOP 1 empl_codigo
+                                          FROM Empleado
+                                          WHERE empl_jefe IS NULL
+                                          ORDER BY empl_salario DESC, empl_ingreso)
+        SET @CantSinJefe  = (SELECT count(*) FROM Empleado WHERE empl_jefe IS NULL)
+
+        IF @CantSinJefe > 1
+            UPDATE Empleado SET empl_jefe = @GerenteGrl WHERE empl_jefe IS NULL AND Empleado.empl_codigo <> @GerenteGrl
+        ELSE
+            PRINT 'hay 1 solo'
+
+    END
+    GO
+
+INSERT Empleado
+VALUES (99,'juan','pedro','1978-01-01 00:00:00','2020-01-03 00:00:00','Gerente',20000,0.5,NULL,1)
+
+SELECT * FROM Empleado WHERE empl_jefe IS NULL AND empl_codigo <> 1
+UPDATE Empleado SET empl_jefe = NULL WHERE empl_codigo = 99
+DELETE Empleado WHERE empl_codigo = 99
+
+DECLARE @Modiff int
+EXEC ChequearGerentes @Modiff OUTPUT
+PRINT @Modiff
+
+/*
+Punto 4.
+Cree el/los objetos de base de datos necesarios para actualizar la columna de
+empleado empl_comision con la sumatoria del total de lo vendido por ese
+empleado a lo largo del último año. Se deberá retornar el código del vendedor
+que más vendió (en monto) a lo largo del último año.
+*/
+
+IF OBJECT_ID('EmplEj4','U') IS NOT NULL
+DROP TABLE EmplEj4
+GO
+SELECT * INTO EmplEj4 FROM Empleado
+
+GO
+CREATE PROC ActualizarComisiones (@vendedor DECIMAL(12,2) OUTPUT)
+    AS
+    BEGIN
+        UPDATE EmplEj4
+        SET empl_comision = (SELECT SUM(fact_total)
+                             FROM Factura
+                             WHERE YEAR(fact_fecha) =
+                                   (SELECT TOP 1 YEAR(fact_fecha) FROM Factura ORDER BY YEAR(fact_fecha) DESC)
+                               AND fact_vendedor = empl_codigo)
+        SET @vendedor = (SELECT TOP 1 empl_codigo
+                         FROM Empleado
+                                  JOIN dbo.Factura F ON Empleado.empl_codigo = F.fact_vendedor
+                         WHERE YEAR(fact_fecha) =
+                               (SELECT TOP 1 YEAR(fact_fecha) FROM Factura ORDER BY YEAR(fact_fecha) DESC)
+                           AND fact_vendedor = empl_codigo
+                         GROUP BY empl_codigo
+                         ORDER BY SUM(fact_total) DESC)
+    END
+
+GO
+
+DECLARE @Modiff int
+EXEC ActualizarComisiones @Modiff OUTPUT
+PRINT @Modiff
+
+/*
+Punto 5.
+Realizar un procedimiento que complete con los datos existentes en el modelo
+provisto la tabla de hechos denominada Fact_table tiene las siguiente definición:
+Create table Fact_table
+( anio char(4),
+mes char(2),
+familia char(3),
+rubro char(4),
+zona char(3),
+cliente char(6),
+producto char(8),
+cantidad decimal(12,2),
+monto decimal(12,2)
+)
+Alter table Fact_table
+Add constraint primary key(anio,mes,familia,rubro,zona,cliente,producto)
+*/
+
+IF OBJECT_ID('Fact_table','U') IS NOT NULL
+DROP TABLE Fact_table
+GO
+
+CREATE TABLE Fact_table
+(
+    anio     CHAR(4) NOT NULL,
+    mes      CHAR(2) NOT NULL,
+    familia  CHAR(3) NOT NULL,
+    rubro    CHAR(4) NOT NULL,
+    zona     CHAR(3) NOT NULL,
+    cliente  CHAR(6) NOT NULL,
+    producto CHAR(8) NOT NULL,
+    cantidad DECIMAL(12, 2),
+    monto    DECIMAL(12, 2)
+)
+ALTER TABLE Fact_table ADD CONSTRAINT pk_fact_table PRIMARY KEY (anio, mes, familia, rubro, zona, cliente, producto)
+GO
+
+IF OBJECT_ID('CargarFactTable','P') IS NOT NULL
+DROP PROCEDURE CargarFactTable
+GO
+
+CREATE PROC CargarFactTable
+AS
+BEGIN
+    INSERT INTO Fact_table
+    SELECT YEAR(fact_fecha),
+           MONTH(fact_fecha),
+           prod_familia,
+           prod_rubro,
+           depa_zona,
+           fact_cliente,
+           prod_codigo,
+           SUM(item_cantidad),
+           SUM(item_precio)
+    FROM Factura
+             JOIN dbo.Item_Factura I
+                  ON Factura.fact_tipo = I.item_tipo AND Factura.fact_sucursal = I.item_sucursal AND
+                     Factura.fact_numero = I.item_numero
+             JOIN dbo.Producto P ON P.prod_codigo = I.item_producto
+             JOIN Empleado ON Factura.fact_vendedor = Empleado.empl_codigo
+             JOIN dbo.Departamento D ON D.depa_codigo = Empleado.empl_departamento
+    GROUP BY YEAR(fact_fecha), MONTH(fact_fecha), prod_familia, prod_rubro, depa_zona, fact_cliente, prod_codigo
+END
+GO
+
+
+EXEC CargarFactTable
+
+/*
+Punto 6.
+Realizar un procedimiento que si en alguna factura se facturaron componentes
+que conforman un combo determinado (o sea que juntos componen otro
+producto de mayor nivel), en cuyo caso deberá reemplazar las filas
+correspondientes a dichos productos por una sola fila con el producto que
+componen con la cantidad de dicho producto que corresponda.
+*/
+
+IF OBJECT_ID('Ej6_itemFactura','U') IS NOT NULL
+DROP TABLE Ej6_itemFactura
+GO
+
+SELECT * INTO Ej6_itemFactura FROM Item_Factura
+GO
+
+
+IF OBJECT_ID('UnificarTablas','P') IS NOT NULL
+DROP PROCEDURE UnificarTablas
+GO
+
+CREATE PROC UnificarTablas
+AS
+    BEGIN
+        DECLARE @combo CHAR(8)
+        DECLARE @combocantidad INTEGER
+        DECLARE @fact_tipo CHAR(1)
+        DECLARE @fact_suc CHAR(4)
+        DECLARE @fact_nro CHAR(8)
+
+        DECLARE factura_cursor CURSOR FOR
+            SELECT fact_numero, fact_tipo, fact_sucursal FROM Factura
+        OPEN factura_cursor
+        FETCH NEXT FROM factura_cursor INTO @fact_nro, @fact_tipo, @fact_suc
+
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+
+            DECLARE cprod CURSOR FOR
+                SELECT comp_producto
+                FROM Ej6_itemFactura IF1
+                         JOIN Composicion C1 ON IF1.item_producto = C1.comp_componente
+                WHERE IF1.item_tipo = @fact_tipo
+                  AND IF1.item_sucursal = @fact_suc
+                  AND IF1.item_numero = @fact_nro
+                  AND IF1.item_cantidad >= C1.comp_cantidad
+                GROUP BY C1.comp_producto
+                HAVING COUNT(*) = (SELECT COUNT(*) FROM Composicion AS C2 WHERE C2.comp_producto = C1.comp_producto)
+
+            OPEN cprod
+            FETCH NEXT FROM cprod INTO @combo
+
+            WHILE @@FETCH_STATUS = 0
+                BEGIN
+                    -- agregar combo a Ej6_itemFactura
+                    SELECT @combocantidad = MIN(FLOOR((item_cantidad / c1.comp_cantidad)))
+                    FROM Ej6_itemFactura
+                             JOIN Composicion C1 ON item_producto = C1.comp_componente
+                    WHERE item_cantidad >= C1.comp_cantidad
+                      AND item_sucursal = @fact_suc
+                      AND item_numero = @fact_nro
+                      AND item_tipo = @fact_tipo
+                      AND C1.comp_producto = @combo
+
+                    INSERT INTO Ej6_itemFactura (item_tipo, item_sucursal, item_numero, item_producto, item_cantidad, item_precio)
+                    VALUES (@fact_tipo, @fact_suc, @fact_nro, @combo, @combocantidad,(SELECT prod_precio FROM Producto WHERE prod_codigo = @combo))
+
+                    -- actualizo la cantidad de items para los productos q pasaron a ser combos
+
+                    UPDATE Ej6_itemFactura
+                    SET
+                        item_cantidad = IF1.item_cantidad - (@combocantidad * (SELECT comp_cantidad
+                                                                               FROM Composicion
+                                                                               WHERE comp_producto = @combo
+                                                                                 AND comp_componente = IF1.item_producto))
+                    FROM Ej6_itemFactura IF1
+                    WHERE IF1.item_sucursal = @fact_suc
+                      AND IF1.item_numero = @fact_nro
+                      AND IF1.item_tipo = @fact_tipo
+
+                    -- eliminar los componentes sobrantes de Ej6_itemFactura
+
+                    DELETE Ej6_itemFactura
+                    WHERE item_cantidad = 0
+                      AND item_sucursal = @fact_suc
+                      AND item_numero = @fact_nro
+                      AND item_tipo = @fact_tipo
+
+
+                    FETCH NEXT FROM cprod INTO @combo
+
+                END
+
+                CLOSE cprod
+                DEALLOCATE cprod
+
+
+            FETCH NEXT FROM factura_cursor INTO @fact_nro, @fact_tipo, @fact_suc
+        END
+        CLOSE factura_cursor
+        DEALLOCATE factura_cursor
+
+    END
+
+GO
+
+EXEC UnificarTablas
+
+
+/*
+Punto 7.
+Hacer un procedimiento que dadas dos fechas complete la tabla Ventas. Debe
+insertar una línea por cada artículo con los movimientos de stock generados por
+las ventas entre esas fechas. La tabla se encuentra creada y vacía.
+
+TABLA DE VENTAS
+------------------------------------------------------------------------------------------------------------
+|  C�digo	|  Detalle  |  Cant. Mov.  |  Precio de Venta  |  Renglon  |           Ganancia              |
+------------------------------------------------------------------------------------------------------------
+|  C�digo	|  Detalle	|  Cantidad de |    Precio  	   |  Nro. de  |  Precio de venta * Cantidad     |
+|  del		|  del      |  movimientos |    promedio 	   |  linea de |  -							     |
+|  articulo |  articulo	|  de ventas   |    de venta	   |  la tabla |  Precio de producto * Cantidad  |
+------------------------------------------------------------------------------------------------------------
+*/
+
+IF OBJECT_ID('Ventas','U') IS NOT NULL
+DROP TABLE Ventas
+GO
+
+CREATE TABLE Ventas
+(
+    vent_renglon     INT IDENTITY(1,1),
+    vent_cod         CHAR(8),
+    vent_detalle     CHAR(50),
+    vent_cant_mov    DECIMAL(12, 0),
+    vent_precio_prom DECIMAL(12, 2),
+    vent_ganancia    DECIMAL(12, 2)
+)
+
+ALTER TABLE Ventas ADD CONSTRAINT pk_ventas PRIMARY KEY (vent_renglon)
+GO
+
+
+IF OBJECT_ID('CargarVentas','P') IS NOT NULL
+DROP PROCEDURE CargarVentas
+GO
+
+CREATE PROC CargarVentas (@FechaInicio SMALLDATETIME, @FechaFin SMALLDATETIME)
+AS
+    BEGIN
+        INSERT INTO Ventas (vent_cod, vent_detalle, vent_cant_mov, vent_precio_prom, vent_ganancia)
+            (SELECT prod_codigo,
+                    prod_detalle,
+                    COUNT(item_producto),
+                    AVG(item_precio * item_cantidad) AS prom,
+                    SUM(item_cantidad * item_precio) - SUM(item_cantidad * P.prod_precio)
+             FROM Producto P
+                      JOIN dbo.Item_Factura I ON P.prod_codigo = I.item_producto
+                      JOIN dbo.Factura F ON F.fact_tipo = I.item_tipo
+                 AND F.fact_sucursal = I.item_sucursal
+                 AND F.fact_numero = I.item_numero
+                 AND fact_fecha BETWEEN @FechaInicio AND @FechaFin
+             GROUP BY prod_codigo, prod_detalle, prod_precio)
+    END
+GO
+
+EXEC CargarVentas '2010-01-23 00:00:00', '2011-10-31 00:00:00'
+
+/*
+Punto 8.
+Realizar un procedimiento que complete la tabla Diferencias de precios, para los
+productos facturados que tengan composición y en los cuales el precio de
+facturación sea diferente al precio del cálculo de los precios unitarios por
+cantidad de sus componentes, se aclara que un producto que compone a otro,
+también puede estar compuesto por otros y así sucesivamente, la tabla se debe
+crear y está formada por las siguientes columnas:
+
+TABLA DE DIFERENCIAS
+------------------------------------------------------------------------------------
+|  Codigo	|  Detalle  |    Cantidad     |  Precio generado  |  Precio facturado  |
+------------------------------------------------------------------------------------
+|  Codigo	|  Detalle	|  Cantidad de    |  Precio que se    |  Precio del        |
+|  del		|  del      |  productos que  |  se compone a 	  |  producto		   |
+|  articulo |  articulo	|  conforman el   |  traves de sus    |					   |
+|           |           |  combo          |  componentes      |					   |
+------------------------------------------------------------------------------------
+*/
+
+IF OBJECT_ID('Diferencias') IS NOT NULL
+	DROP TABLE Diferencias
+GO
+
+CREATE TABLE Diferencias
+(
+    dif_codigo           CHAR(8),
+    dif_detalle          CHAR(50),
+    dif_cantidad         NUMERIC(6, 0),
+    dif_precio_generado  DECIMAL(12, 2),
+    dif_precio_facturado DECIMAL(12, 2)
+)
+GO
+
+IF OBJECT_ID('CalcularPrecioGenerado') IS NOT NULL
+DROP FUNCTION CalcularPrecioGenerado
+GO
+
+CREATE FUNCTION CalcularPrecioGenerado(@producto CHAR(8))
+    RETURNS DECIMAL(12, 2)
+AS
+    BEGIN
+        DECLARE @precioFinal DECIMAL(12,2)
+        IF @producto IN (SELECT comp_producto FROM Composicion)
+            SELECT @precioFinal = SUM(dbo.CalcularPrecioGenerado(comp_componente) * comp_cantidad)
+            FROM Composicion
+            WHERE comp_producto = @producto
+        ELSE
+            SELECT @precioFinal = prod_precio FROM Producto WHERE prod_codigo = @producto
+
+        RETURN @precioFinal
+    END
+GO
+
+IF OBJECT_ID('CargarDiferencias','P') IS NOT NULL
+DROP PROCEDURE CargarDiferencias
+GO
+
+CREATE PROC CargarDiferencias
+AS
+    BEGIN
+        INSERT INTO Diferencias
+        SELECT P.prod_codigo,
+               P.prod_detalle,
+               COUNT(DISTINCT comp_componente),
+               dbo.CalcularPrecioGenerado(prod_codigo),
+               prod_precio
+        FROM Producto P
+                 JOIN dbo.Composicion C ON P.prod_codigo = C.comp_producto
+                 JOIN dbo.Item_Factura I ON P.prod_codigo = I.item_producto
+        GROUP BY prod_codigo, prod_detalle, prod_precio
+    END
+GO
+
+EXEC CargarDiferencias
+
+
+
+/*
+Punto 9.
+Crear el/los objetos de base de datos que ante alguna modificación de un ítem de
+factura de un artículo con composición realice el movimiento de sus
+correspondientes componentes.
+*/
+
+IF OBJECT_ID('Ej9_itemFactura','U') IS NOT NULL
+DROP TABLE Ej9_itemFactura
+GO
+
+SELECT * INTO Ej9_itemFactura FROM Item_Factura
+GO
+
+IF OBJECT_ID('Ej9_stock','U') IS NOT NULL
+DROP TABLE Ej9_stock
+GO
+
+SELECT * INTO Ej9_stock FROM STOCK
+GO
+
+IF OBJECT_ID('ActualizarStockComponentes','P') IS NOT NULL
+    DROP PROCEDURE ActualizarStockComponentes
+
+CREATE PROC ActualizarStockComponentes @producto CHAR(8), @diferencia DECIMAL(12,2), @resultado int OUTPUT
+AS
+    BEGIN
+        IF EXISTS(SELECT * FROM  Composicion WHERE comp_producto = @producto)
+        BEGIN
+            DECLARE @componente CHAR(8)
+            DECLARE @cantidad DECIMAL(12,2)
+
+            SET @resultado = 1
+
+            DECLARE CR_componente CURSOR FOR
+            SELECT comp_componente,
+                   comp_cantidad
+            FROM Composicion
+            WHERE comp_producto = @producto
+
+            OPEN CR_componente
+            FETCH NEXT FROM CR_componente INTO @componente, @cantidad
+
+            BEGIN TRANSACTION
+
+            WHILE @@FETCH_STATUS = 0
+                BEGIN
+                    DECLARE @limiteDepo DECIMAL(12,2)
+                    DECLARE @stockActual DECIMAL(12,2)
+                    DECLARE @deposito CHAR(2)
+                    DECLARE @stockNuevo DECIMAL(12,2)
+
+                    SELECT @limiteDepo = ISNULL(stoc_stock_maximo, 0),
+                           @stockActual = stoc_cantidad,
+                           @deposito = stoc_deposito
+                    FROM Ej9_stock
+                    WHERE stoc_producto = @componente
+                    ORDER BY (stoc_stock_maximo - stoc_cantidad) DESC
+
+                    SET @stockNuevo = @stockActual + @diferencia * @cantidad
+
+                    IF @stockNuevo <= @limiteDepo
+                    BEGIN
+                        UPDATE Ej9_stock
+                        SET stoc_cantidad = @stockNuevo
+                        WHERE stoc_deposito = @deposito
+                          AND stoc_producto = @componente
+                    END
+                    ELSE
+                    BEGIN
+                        SET @resultado = 0
+                    END
+
+                    FETCH NEXT FROM CR_componente INTO @componente, @cantidad
+                END
+
+            IF @resultado = 1
+                COMMIT TRANSACTION
+            ELSE
+                ROLLBACK TRANSACTION
+
+            CLOSE CR_componente
+            DEALLOCATE CR_componente
+
+        END
+    END
+GO
+
+IF OBJECT_ID('TriggerComponentes') IS NOT NULL
+	DROP TRIGGER TriggerComponentes
+GO
+
+CREATE TRIGGER TriggerComponentes ON Ej9_itemFactura INSTEAD OF UPDATE
+AS
+    IF UPDATE(item_cantidad)
+        AND item_producto IN (SELECT comp_producto
+                              FROM Composicion)
+        BEGIN
+            DECLARE @diferencia DECIMAL(12,2)
+            DECLARE @producto CHAR(8)
+            DECLARE @numero CHAR(8)
+            DECLARE @tipo CHAR(1)
+            DECLARE @sucursal CHAR(4)
+            DECLARE @resultado INT
+
+            DECLARE CR_prod_compuestos CURSOR FOR
+                SELECT inserted.item_producto,
+                       deleted.item_cantidad - inserted.item_cantidad,
+                       inserted.item_numero,
+                       inserted.item_tipo,
+                       inserted.item_sucursal
+            FROM inserted
+            JOIN deleted ON inserted.item_numero = deleted.item_numero
+                                AND inserted.item_tipo = deleted.item_tipo
+                                AND inserted.item_sucursal = deleted.item_sucursal
+                                AND inserted.item_producto = deleted.item_producto
+
+            OPEN CR_prod_compuestos
+            FETCH NEXT FROM CR_prod_compuestos INTO @producto, @diferencia, @numero, @tipo, @sucursal
+
+            WHILE @@FETCH_STATUS = 0
+                BEGIN
+
+                    EXEC ActualizarStockComponentes @producto, @diferencia, @resultado OUTPUT
+
+                    IF @resultado = 1
+                        BEGIN
+                            UPDATE Ej9_itemFactura
+                            SET item_cantidad = item_cantidad - @diferencia
+                            WHERE item_numero = @numero
+                              AND item_sucursal = @sucursal
+                              AND item_tipo = @tipo
+                              AND item_producto = @producto
+                        END
+
+                    FETCH NEXT FROM CR_prod_compuestos INTO @producto, @diferencia, @numero, @tipo, @sucursal
+                END
+
+            CLOSE CR_prod_compuestos
+            DEALLOCATE CR_prod_compuestos
+        END
+
+
+
+/*
+Punto 10.
+Crear el/los objetos de base de datos que ante el intento de borrar un artículo
+verifique que no exista stock y si es así lo borre en caso contrario que emita un
+mensaje de error.
+*/
+
+IF OBJECT_ID('Ej10_producto','U') IS NOT NULL
+DROP TABLE Ej10_producto
+GO
+
+SELECT * INTO Ej10_producto FROM Producto
+GO
+
+IF OBJECT_ID('TR_verificarStockDelete') IS NOT NULL
+	DROP TRIGGER TR_verificarStockDelete
+GO
+
+CREATE TRIGGER TR_verificarStockDelete ON Ej10_producto INSTEAD OF DELETE
+AS
+    BEGIN
+        DECLARE @producto CHAR(8)
+
+        DECLARE prod_del CURSOR FOR
+        SELECT prod_codigo FROM deleted
+
+        OPEN prod_del
+        FETCH NEXT FROM prod_del INTO @producto
+
+        WHILE @@fetch_status = 0
+            BEGIN
+                DECLARE @stock DECIMAL(12,2)
+
+                SELECT @stock = SUM(stoc_cantidad)
+                FROM STOCK
+                WHERE stoc_producto = @producto
+                GROUP BY stoc_producto
+
+                IF @stock > 0
+                    RAISERROR ('No se pudo eliminar el producto %s porque todavia tiene stock',16,1, @producto)
+                ELSE
+                    DELETE Ej10_producto WHERE prod_codigo = @producto
+
+
+                FETCH NEXT FROM prod_del INTO @producto
+            END
+
+        CLOSE prod_del
+        DEALLOCATE prod_del
+
+    END
+
+
+/*
+Punto 11.
+Cree el/los objetos de base de datos necesarios para que dado un código de
+empleado se retorne la cantidad de empleados que este tiene a su cargo (directa o
+indirectamente). Solo contar aquellos empleados (directos o indirectos) que
+tengan un código mayor que su jefe directo.
+*/
+
+
+IF OBJECT_ID('FX_cant_empl') IS NOT NULL
+	DROP FUNCTION FX_cant_empl
+GO
+
+CREATE FUNCTION FX_cant_empl (@jefe NUMERIC(6,0))
+	RETURNS INT
+AS
+    BEGIN
+        DECLARE @empleadosACargo INT = 0
+        DECLARE @empleado NUMERIC(6)
+
+        DECLARE empleados CURSOR FOR
+        SELECT empl_codigo FROM Empleado WHERE empl_jefe = @jefe
+
+        OPEN empleados
+        FETCH NEXT FROM empleados INTO @empleado
+
+        WHILE @@FETCH_STATUS = 0
+            BEGIN
+
+                IF @empleado IN (SELECT empl_jefe FROM Empleado)
+                    BEGIN
+                        SET @empleadosACargo = @empleadosACargo + dbo.FX_cant_empl(@empleado) + 1
+                    END
+                ELSE
+                     SET @empleadosACargo = @empleadosACargo + 1
+
+                FETCH NEXT FROM empleados INTO @empleado
+            END
+
+        CLOSE empleados
+        DEALLOCATE empleados
+
+        RETURN @empleadosACargo
+    END
+
+SELECT dbo.FX_cant_empl(3)
+
+
+/*
+Punto 12.
+Cree el/los objetos de base de datos necesarios para que nunca un producto
+pueda ser compuesto por sí mismo. Se sabe que en la actualidad dicha regla se
+cumple y que la base de datos es accedida por n aplicaciones de diferentes tipos
+y tecnologías. No se conoce la cantidad de niveles de composición existentes.
+*/
+
+IF OBJECT_ID('TR_ChqeuearComp') IS NOT NULL
+	DROP TRIGGER TR_ChqeuearComp
+GO
+
+CREATE TRIGGER TR_ChqeuearComp ON Composicion INSTEAD OF INSERT
+AS
+    BEGIN
+        DECLARE @comp_prod CHAR(8)
+        DECLARE @componente CHAR(8)
+
+        DECLARE CR_composicion CURSOR FOR
+        SELECT inserted.comp_producto,
+               inserted.comp_componente
+        FROM inserted
+
+        OPEN CR_composicion
+        FETCH NEXT FROM CR_composicion INTO @comp_prod, @componente
+
+        WHILE @@FETCH_STATUS = 0
+            BEGIN
+
+                IF @comp_prod <> @componente
+                    BEGIN
+                        INSERT INTO Composicion
+                        SELECT *
+                        FROM inserted
+                        WHERE inserted.comp_producto = @comp_prod
+                          AND inserted.comp_componente = @componente
+                    END
+                ELSE
+                    RAISERROR ('El producto no puede estar compuesto por si mismo',16,1)
+
+                FETCH NEXT FROM CR_composicion INTO @comp_prod, @componente
+            END
+
+        CLOSE CR_composicion
+        DEALLOCATE CR_composicion
+
+    END
+
+/*
+Punto 13.
+Cree el/los objetos de base de datos necesarios para implantar la siguiente regla
+“Ningún jefe puede tener un salario mayor al 20% de las suma de los salarios de
+sus empleados totales (directos + indirectos)”. Se sabe que en la actualidad dicha
+regla se cumple y que la base de datos es accedida por n aplicaciones de
+diferentes tipos y tecnologías
+*/
+
+IF OBJECT_ID('FX_sueldos_empl') IS NOT NULL
+	DROP FUNCTION FX_sueldos_empl
+GO
+
+CREATE FUNCTION FX_sueldos_empl (@jefe NUMERIC(6,0))
+	RETURNS DECIMAL(12,2)
+AS
+    BEGIN
+        DECLARE @sueldosEmpleadosACargo DECIMAL(12,2) = 0
+        DECLARE @empleado NUMERIC(6)
+
+        DECLARE empleados CURSOR FOR
+        SELECT empl_codigo FROM Empleado WHERE empl_jefe = @jefe
+
+        OPEN empleados
+        FETCH NEXT FROM empleados INTO @empleado
+
+        WHILE @@FETCH_STATUS = 0
+            BEGIN
+                IF @empleado IN (SELECT empl_jefe FROM Empleado)
+                    BEGIN
+                        SET @sueldosEmpleadosACargo = @sueldosEmpleadosACargo + dbo.FX_sueldos_empl(@empleado) + (SELECT empl_salario FROM Empleado WHERE empl_codigo = @empleado)
+                    END
+                ELSE
+                     SET @sueldosEmpleadosACargo = @sueldosEmpleadosACargo + (SELECT empl_salario FROM Empleado WHERE empl_codigo = @empleado)
+
+                FETCH NEXT FROM empleados INTO @empleado
+            END
+
+        CLOSE empleados
+        DEALLOCATE empleados
+
+        RETURN @sueldosEmpleadosACargo
+    END
+
+SELECT dbo.FX_sueldos_empl(3)
+
+IF OBJECT_ID('TR_verificarSalarioJefes') IS NOT NULL
+	DROP TRIGGER TR_verificarSalarioJefes
+GO
+
+CREATE TRIGGER TR_verificarSalarioJefes ON Empleado INSTEAD OF UPDATE
+AS
+    IF UPDATE(empl_salario)
+        BEGIN
+            DECLARE @jefe NUMERIC(6)
+            DECLARE @salarioJefe DECIMAL(12,2)
+
+            DECLARE CR_Jefes CURSOR FOR
+            SELECT empl_codigo,
+                   empl_salario
+            FROM inserted
+
+            OPEN CR_Jefes
+            FETCH NEXT FROM CR_Jefes INTO @jefe, @salarioJefe
+
+            WHILE @@FETCH_STATUS = 0
+                BEGIN
+                    IF @salarioJefe > 0.2 * dbo.FX_sueldos_empl(@jefe) AND @jefe IN (SELECT empl_jefe FROM Empleado)
+                        BEGIN
+                            RAISERROR('No se le puede designar ese salario al empleado: %s',16,1,@jefe)
+                        END
+                    ELSE
+                        BEGIN
+                            UPDATE Empleado
+                            SET empl_salario = @salarioJefe
+                            WHERE empl_codigo = @jefe
+                        END
+                    FETCH NEXT FROM CR_Jefes INTO @jefe, @salarioJefe
+                END
+
+            CLOSE CR_Jefes
+            DEALLOCATE CR_Jefes
+
+        END
 
 
