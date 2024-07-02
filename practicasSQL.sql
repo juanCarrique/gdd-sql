@@ -1936,4 +1936,114 @@ AS
 
         END
 
+/*
+Punto 14.
+Agregar el/los objetos necesarios para que si un cliente compra un producto
+compuesto a un precio menor que la suma de los precios de sus componentes
+que imprima la fecha, que cliente, que productos y a qué precio se realizó la
+compra. No se deberá permitir que dicho precio sea menor a la mitad de la suma
+de los componentes.
+*/
+
+CREATE FUNCTION FX_PRECIO_COMPONENTES (@producto CHAR(8))
+    RETURNS DECIMAL(12,2)
+    AS
+    BEGIN
+        DECLARE @precioFinal DECIMAL(12,2)
+
+        SELECT @precioFinal = SUM(prod_precio * comp_cantidad)
+        FROM Composicion
+                 JOIN dbo.Producto P ON P.prod_codigo = Composicion.comp_componente
+        WHERE comp_producto = @producto
+
+        RETURN @precioFinal
+    END
+
+CREATE TRIGGER TR_Compuestos ON Item_Factura INSTEAD OF INSERT
+    AS
+    BEGIN
+        DECLARE @numero CHAR(8)
+        DECLARE @tipo CHAR
+        DECLARE @sucursal CHAR(4)
+
+        DECLARE CR_FACTURA CURSOR FOR
+        SELECT item_sucursal,
+               item_numero,
+               item_tipo
+        FROM inserted
+        GROUP BY item_sucursal, item_numero, item_tipo
+
+        OPEN CR_FACTURA
+        FETCH NEXT FROM CR_FACTURA INTO @sucursal, @numero, @tipo
+
+        WHILE @@FETCH_STATUS = 0
+            BEGIN
+                DECLARE @producto CHAR(8)
+                DECLARE @precio DECIMAL(12,2)
+
+                DECLARE CR_COMPUESTO CURSOR FOR
+                SELECT item_producto,
+                       item_precio
+                FROM inserted
+                WHERE item_sucursal = @sucursal AND
+                      item_tipo = @tipo AND
+                      item_numero = @numero
+
+                OPEN CR_COMPUESTO
+                FETCH NEXT FROM CR_COMPUESTO INTO @producto, @precio
+
+                WHILE @@FETCH_STATUS = 0
+                    BEGIN
+
+                        IF @producto IN (SELECT comp_producto FROM Composicion GROUP BY comp_producto)
+                            BEGIN
+                                IF @precio BETWEEN FX_PRECIO_COMPONENTES(@producto)/2 AND FX_PRECIO_COMPONENTES(@producto)
+                                BEGIN
+                                    INSERT INTO Item_Factura
+                                    SELECT * FROM inserted
+                                    WHERE item_producto = @producto AND
+                                          item_sucursal = @sucursal AND
+                                          item_numero = @numero AND
+                                          item_tipo = @tipo
+                                    DECLARE @cliente CHAR(8)
+                                    DECLARE @fecha SMALLDATETIME
+
+                                    SELECT @cliente = fact_cliente, @fecha = fact_fecha
+                                    FROM Factura
+                                    WHERE fact_sucursal = @sucursal AND fact_tipo = @tipo AND fact_numero = @numero
+
+                                    PRINT 'El cliente ' + @cliente + ', compro ' + @producto + ' a ' + CAST(@precio AS NVARCHAR(20)) + ' el dia ' + CONVERT(NVARCHAR(20), @fecha, 120)
+                                END
+                            END
+
+                        FETCH NEXT FROM CR_COMPUESTO INTO @producto, @precio
+                    END
+
+                CLOSE CR_COMPUESTO
+                DEALLOCATE CR_COMPUESTO
+
+
+                FETCH NEXT FROM CR_FACTURA INTO @sucursal, @numero, @tipo
+            END
+
+        CLOSE CR_FACTURA
+        DEALLOCATE CR_FACTURA
+
+    END
+
+/*
+Punto 15.
+Cree el/los objetos de base de datos necesarios para que el objeto principal
+reciba un producto como parametro y retorne el precio del mismo.
+Se debe prever que el precio de los productos compuestos sera la sumatoria de
+los componentes del mismo multiplicado por sus respectivas cantidades. No se
+conocen los nivles de anidamiento posibles de los productos. Se asegura que
+nunca un producto esta compuesto por si mismo a ningun nivel. El objeto
+principal debe poder ser utilizado como filtro en el where de una sentencia
+select.
+*/
+
+
+
+
 
